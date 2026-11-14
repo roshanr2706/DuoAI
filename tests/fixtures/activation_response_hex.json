@@ -1,0 +1,11 @@
+{
+  "response": {
+    "hotp_secret": "00112233445566778899aabbccddeeff",
+    "hotp_counter": 0,
+    "akey": "DPFAKEAKEY0000000000",
+    "pkey": "DPFAKEPKEY0000000000",
+    "customer_name": "Example Org",
+    "use_totp": true
+  },
+  "stat": "OK"
+}

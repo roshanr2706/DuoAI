@@ -1,20 +1,24 @@
 import base64
 import json
 import pathlib
+import stat
 
 import pytest
 
 from duo_agent.enroll import (
     EnrollError,
     build_activation_request,
+    decode_seed,
     enroll,
     parse_activation,
 )
 from duo_agent.store import SecretStore
 
-FIXTURE = json.loads(
-    (pathlib.Path(__file__).parent / "fixtures" / "activation_response.json").read_text()
-)
+FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+FIXTURE = json.loads((FIXTURES / "activation_response.json").read_text())
+FIXTURE_HEX = json.loads((FIXTURES / "activation_response_hex.json").read_text())
+
+HOST = "api-abc12345.duosecurity.com"
 
 
 class _FakeResp:
@@ -32,38 +36,96 @@ def _fake_post(payload):
     return post
 
 
+def _act(code="ABC1234567", host=HOST, pad=True):
+    b64 = base64.b64encode(host.encode()).decode().rstrip("=")
+    if pad:
+        b64 += "=" * (-len(b64) % 4)
+    return f"{code}-{b64}"
+
+
 def test_parse_activation_splits_code_and_decodes_host():
-    host = "api-abc12345.duosecurity.com"
-    b64 = base64.b64encode(host.encode()).decode()
-    code, parsed_host = parse_activation(f"ABC1234567-{b64}")
+    code, host = parse_activation(_act())
     assert code == "ABC1234567"
-    assert parsed_host == host
+    assert host == HOST
 
 
-def test_build_request_has_customer_protocol_and_no_pubkey():
-    url, headers, data = build_activation_request("CODE", "api-xxx.duosecurity.com")
-    assert "/push/v2/activation/CODE" in url
-    assert url.endswith("?customer_protocol=1")
-    assert "pubkey" not in data
+def test_parse_activation_tolerates_unpadded_base64():
+    """Duo's own QR/deeplink string omits '=' padding."""
+    unpadded = _act(pad=False)
+    assert not unpadded.endswith("=")
+    assert parse_activation(unpadded) == ("ABC1234567", HOST)
+
+
+def test_build_request_puts_fields_and_pubkey_in_query_string():
+    url, headers = build_activation_request("CODE", HOST, "-----BEGIN PUBLIC KEY-----")
+    assert url.startswith(f"https://{HOST}/push/v2/activation/CODE?")
+    assert "customer_protocol=1" in url
+    assert "pubkey=" in url
+    assert "pkpush=rsa-sha512" in url
+    assert "app_id=com.duosecurity.duomobile" in url
     assert headers["User-Agent"].startswith("okhttp")
 
 
-def test_enroll_stores_b32_secret_and_counter_zero(tmp_path):
+def test_decode_seed_hex_bytes():
+    b32, fmt = decode_seed("00112233445566778899aabbccddeeff")
+    assert fmt == "hex-bytes"
+    assert base64.b32decode(b32) == bytes.fromhex("00112233445566778899aabbccddeeff")
+
+
+def test_decode_seed_legacy_plain_20_chars():
+    b32, fmt = decode_seed("12345678901234567890")
+    assert fmt == "plain-text"
+    assert base64.b32decode(b32) == b"12345678901234567890"
+
+
+def test_decode_seed_already_base32():
+    raw = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+    b32, fmt = decode_seed(raw)
+    assert (b32, fmt) == (raw, "base32")
+
+
+def test_enroll_stores_b32_of_plain_seed(tmp_path):
     store = SecretStore(tmp_path / "cfg")
-    host = "api-xxx.duosecurity.com"
-    b64 = base64.b64encode(host.encode()).decode()
-    enroll(f"CODE-{b64}", store, post=_fake_post(FIXTURE))
-    expected_b32 = base64.b32encode(b"12345678901234567890").decode()
-    assert store.load() == {"hotp_secret": expected_b32, "counter": 0}
+    enroll(_act(), store, post=_fake_post(FIXTURE))
+    expected = base64.b32encode(b"12345678901234567890").decode()
+    data = store.load()
+    assert data["hotp_secret"] == expected
+    assert data["counter"] == 0
+    assert data["seed_format"] == "plain-text"
+
+
+def test_enroll_stores_b32_of_hex_seed(tmp_path):
+    store = SecretStore(tmp_path / "cfg")
+    enroll(_act(), store, post=_fake_post(FIXTURE_HEX))
+    key = bytes.fromhex(FIXTURE_HEX["response"]["hotp_secret"])
+    assert store.load()["hotp_secret"] == base64.b32encode(key).decode()
+    assert store.load()["seed_format"] == "hex-bytes"
+
+
+def test_enroll_honours_returned_counter(tmp_path):
+    payload = json.loads(json.dumps(FIXTURE_HEX))
+    payload["response"]["hotp_counter"] = 3
+    store = SecretStore(tmp_path / "cfg")
+    enroll(_act(), store, post=_fake_post(payload))
+    assert store.load()["counter"] == 3
+
+
+def test_enroll_saves_device_identity_0600(tmp_path):
+    store = SecretStore(tmp_path / "cfg")
+    enroll(_act(), store, post=_fake_post(FIXTURE_HEX))
+    dev = store.dir / "device.json"
+    assert dev.exists()
+    assert stat.S_IMODE(dev.stat().st_mode) == 0o600
+    blob = json.loads(dev.read_text())
+    assert blob["akey"] == FIXTURE_HEX["response"]["akey"]
+    assert "PRIVATE KEY" in blob["private_key_pem"]
 
 
 def test_enroll_raises_on_error_response(tmp_path):
     store = SecretStore(tmp_path / "cfg")
-    host = "api-xxx.duosecurity.com"
-    b64 = base64.b64encode(host.encode()).decode()
-    bad = {"stat": "FAIL", "message": "activation code expired"}
-    with pytest.raises(EnrollError):
-        enroll(f"CODE-{b64}", store, post=_fake_post(bad))
+    bad = {"stat": "FAIL", "code": 40403, "message": "Unknown activation code"}
+    with pytest.raises(EnrollError, match="Unknown activation code"):
+        enroll(_act(), store, post=_fake_post(bad))
     assert store.exists() is False
 
 
@@ -80,8 +142,17 @@ def _raising_post():
 
 def test_enroll_raises_on_non_json_response(tmp_path):
     store = SecretStore(tmp_path / "cfg")
-    host = "api-xxx.duosecurity.com"
-    b64 = base64.b64encode(host.encode()).decode()
-    with pytest.raises(EnrollError):
-        enroll(f"CODE-{b64}", store, post=_raising_post())
+    with pytest.raises(EnrollError, match="not valid JSON"):
+        enroll(_act(), store, post=_raising_post())
+    assert store.exists() is False
+
+
+def test_enroll_raises_when_no_seed(tmp_path):
+    store = SecretStore(tmp_path / "cfg")
+    with pytest.raises(EnrollError, match="no hotp_secret"):
+        enroll(
+            _act(),
+            store,
+            post=_fake_post({"stat": "OK", "response": {"akey": "a", "pkey": "p"}}),
+        )
     assert store.exists() is False
