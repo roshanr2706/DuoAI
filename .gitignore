@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Superpowers execution workspace (git-ignored scratch)
+.superpowers/
+
+# Local secrets store (never commit)
+*.hotp
+response.json
