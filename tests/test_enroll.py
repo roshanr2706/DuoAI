@@ -65,3 +65,23 @@ def test_enroll_raises_on_error_response(tmp_path):
     with pytest.raises(EnrollError):
         enroll(f"CODE-{b64}", store, post=_fake_post(bad))
     assert store.exists() is False
+
+
+def _raising_post():
+    class _BadResp:
+        def json(self):
+            raise ValueError("No JSON object could be decoded")
+
+    def post(url, headers=None, data=None):
+        return _BadResp()
+
+    return post
+
+
+def test_enroll_raises_on_non_json_response(tmp_path):
+    store = SecretStore(tmp_path / "cfg")
+    host = "api-xxx.duosecurity.com"
+    b64 = base64.b64encode(host.encode()).decode()
+    with pytest.raises(EnrollError):
+        enroll(f"CODE-{b64}", store, post=_raising_post())
+    assert store.exists() is False

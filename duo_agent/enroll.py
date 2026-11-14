@@ -45,7 +45,13 @@ def enroll(activation: str, store: SecretStore, *, post=requests.post) -> None:
     """Activate, extract the HOTP secret, and store it with counter 0."""
     code, host = parse_activation(activation)
     url, headers, data = build_activation_request(code, host)
-    payload = post(url, headers=headers, data=data).json()
+    resp = post(url, headers=headers, data=data)
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise EnrollError(
+            f"activation response was not valid JSON: {exc}"
+        ) from exc
     try:
         raw_secret = payload["response"]["hotp_secret"]
     except (KeyError, TypeError) as exc:
