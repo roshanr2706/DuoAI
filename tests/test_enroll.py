@@ -16,7 +16,7 @@ from duo_agent.store import SecretStore
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 FIXTURE = json.loads((FIXTURES / "activation_response.json").read_text())
-FIXTURE_HEX = json.loads((FIXTURES / "activation_response_hex.json").read_text())
+FIXTURE_TOTP = json.loads((FIXTURES / "activation_response_totp.json").read_text())
 
 HOST = "api-abc12345.duosecurity.com"
 
@@ -66,44 +66,46 @@ def test_build_request_puts_fields_and_pubkey_in_query_string():
     assert headers["User-Agent"].startswith("okhttp")
 
 
-def test_decode_seed_hex_bytes():
-    b32, fmt = decode_seed("00112233445566778899aabbccddeeff")
-    assert fmt == "hex-bytes"
-    assert base64.b32decode(b32) == bytes.fromhex("00112233445566778899aabbccddeeff")
+def test_decode_seed_is_base32_of_the_text_seed():
+    """The seed string's own bytes are the key — never a hex/byte decode.
+
+    Guards the live-verified behaviour: reading a hex-looking seed as hex
+    yields codes Duo refuses with status_enum 11, "Incorrect passcode".
+    """
+    raw = "00112233445566778899aabbccddeeff"
+    b32, fmt = decode_seed(raw)
+    assert fmt == "b32-of-text"
+    assert base64.b32decode(b32) == raw.encode()
 
 
-def test_decode_seed_legacy_plain_20_chars():
+def test_decode_seed_legacy_20_chars_same_transform():
     b32, fmt = decode_seed("12345678901234567890")
-    assert fmt == "plain-text"
+    assert fmt == "b32-of-text"
     assert base64.b32decode(b32) == b"12345678901234567890"
 
 
-def test_decode_seed_already_base32():
-    raw = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
-    b32, fmt = decode_seed(raw)
-    assert (b32, fmt) == (raw, "base32")
-
-
-def test_enroll_stores_b32_of_plain_seed(tmp_path):
+def test_enroll_stores_hotp_mode_when_use_totp_absent(tmp_path):
     store = SecretStore(tmp_path / "cfg")
     enroll(_act(), store, post=_fake_post(FIXTURE))
     expected = base64.b32encode(b"12345678901234567890").decode()
     data = store.load()
     assert data["hotp_secret"] == expected
     assert data["counter"] == 0
-    assert data["seed_format"] == "plain-text"
+    assert data["otp_mode"] == "hotp"
+    assert data["seed_format"] == "b32-of-text"
 
 
-def test_enroll_stores_b32_of_hex_seed(tmp_path):
+def test_enroll_stores_totp_mode_when_use_totp_true(tmp_path):
     store = SecretStore(tmp_path / "cfg")
-    enroll(_act(), store, post=_fake_post(FIXTURE_HEX))
-    key = bytes.fromhex(FIXTURE_HEX["response"]["hotp_secret"])
-    assert store.load()["hotp_secret"] == base64.b32encode(key).decode()
-    assert store.load()["seed_format"] == "hex-bytes"
+    enroll(_act(), store, post=_fake_post(FIXTURE_TOTP))
+    raw = FIXTURE_TOTP["response"]["hotp_secret"]
+    data = store.load()
+    assert data["otp_mode"] == "totp"
+    assert data["hotp_secret"] == base64.b32encode(raw.encode()).decode()
 
 
 def test_enroll_honours_returned_counter(tmp_path):
-    payload = json.loads(json.dumps(FIXTURE_HEX))
+    payload = json.loads(json.dumps(FIXTURE))
     payload["response"]["hotp_counter"] = 3
     store = SecretStore(tmp_path / "cfg")
     enroll(_act(), store, post=_fake_post(payload))
@@ -112,12 +114,12 @@ def test_enroll_honours_returned_counter(tmp_path):
 
 def test_enroll_saves_device_identity_0600(tmp_path):
     store = SecretStore(tmp_path / "cfg")
-    enroll(_act(), store, post=_fake_post(FIXTURE_HEX))
+    enroll(_act(), store, post=_fake_post(FIXTURE_TOTP))
     dev = store.dir / "device.json"
     assert dev.exists()
     assert stat.S_IMODE(dev.stat().st_mode) == 0o600
     blob = json.loads(dev.read_text())
-    assert blob["akey"] == FIXTURE_HEX["response"]["akey"]
+    assert blob["akey"] == FIXTURE_TOTP["response"]["akey"]
     assert "PRIVATE KEY" in blob["private_key_pem"]
 
 

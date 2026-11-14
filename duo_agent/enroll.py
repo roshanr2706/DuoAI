@@ -19,11 +19,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from duo_agent import protocol
 from duo_agent.store import SecretStore, atomic_write
 
-# A 16-byte key is the RFC 4226 minimum, so a hex-encoded seed is at least 32
-# characters; anything shorter is the older plain-text form.
-_HEX = set("0123456789abcdef")
-_B32 = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567=")
-
 
 class EnrollError(Exception):
     """Activation failed or returned no HOTP secret."""
@@ -64,15 +59,13 @@ def public_key_pem(private_key) -> str:
 def decode_seed(raw: str) -> tuple[str, str]:
     """Return ``(base32_secret_for_pyotp, format_tag)``.
 
-    Duo's current response is 32 hex chars -> 16 raw bytes. Older builds
-    returned a plain 20-char seed, which duo-bypass base32-encoded as text.
+    Duo hands back the seed as a plain string whose bytes are the key, so the
+    pyotp secret is its base32 encoding — the convention duo-bypass and
+    duo-totp both use. Verified live 2026-11-14: an accepted passcode came
+    from exactly this transform (the value looked hex-ish, but decoding it as
+    hex produced codes Duo refused). Do not "improve" this into a byte decode.
     """
-    low = raw.lower()
-    if len(raw) >= 32 and len(raw) % 2 == 0 and set(low) <= _HEX:
-        return base64.b32encode(bytes.fromhex(low)).decode("ascii"), "hex-bytes"
-    if set(raw.upper()) <= _B32:
-        return raw.upper(), "base32"
-    return base64.b32encode(raw.encode()).decode("ascii"), "plain-text"
+    return base64.b32encode(raw.encode()).decode("ascii"), "b32-of-text"
 
 
 def build_activation_request(code: str, host: str, pubkey_pem: str):
@@ -131,9 +124,16 @@ def enroll(
         raise EnrollError("activation returned no hotp_secret (push-only slot?)")
     secret_b32, seed_format = decode_seed(raw_secret)
     counter = int(response.get("hotp_counter") or 0)
+    # Duo decides per customer whether the slot gets TOTP or HOTP passcodes.
+    otp_mode = "totp" if response.get("use_totp") else "hotp"
 
     store.save(
-        {"hotp_secret": secret_b32, "counter": counter, "seed_format": seed_format}
+        {
+            "hotp_secret": secret_b32,
+            "counter": counter,
+            "otp_mode": otp_mode,
+            "seed_format": seed_format,
+        }
     )
     _write_device(
         store,
