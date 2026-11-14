@@ -1,0 +1,8 @@
+{
+  "response": {
+    "hotp_secret": "12345678901234567890",
+    "pkey": "DPFAKEFAKEFAKEFAKE00",
+    "customer_name": "Example Org"
+  },
+  "stat": "OK"
+}
