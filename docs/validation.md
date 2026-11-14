@@ -34,7 +34,23 @@ The entry point is then `duo-agent`. (Without installing: `python -m duo_agent.c
 
 ## Outcome
 
-- Date:
-- Passcode option offered on the login? (yes / no):
-- `duo-agent code` accepted? (yes / no):
+- Date: 2026-11-14 (`api-ee00e039.duosecurity.com`, `otp_mode: totp`)
+- Passcode option offered on the login? (yes / no): **yes** — the Duo prompt
+  exposes a `mobile_otp` factor (6 digits) even though its UI hangs on
+  "Loading"; it can be answered through the prompt's own API.
+- `duo-agent code` accepted? (yes / no): **yes**, three times. Duo answered
+  `auth_method_type: mobile_otp`, `status_enum: 5` (success), and
+  `authenticator_key: DPVVM34IW2227MIGN88O` — the enrolled slot, not the
+  phone. A full login + SAML to SCOPE completed with no phone in the loop.
 - Notes:
+  - The slot is **TOTP**, not HOTP (`use_totp: true` in the activation
+    response). Earlier HOTP codes for the same seed were refused with
+    `status_enum: 11` (incorrect passcode).
+  - The seed is `b32encode(text)`, never a hex/byte decode, despite looking
+    hex-ish.
+  - The prompt's first `pre_authn/evaluation` call answers 400 until the page
+    app has bootstrapped; retry until 200, then POST
+    `/auth/factors/mobile_otp` with `{authkey, mobile_otp}` and follow
+    `finalize_auth` → `response.url`.
+  - Nothing here says anything about push: a login that offers only a
+    verified-push prompt still needs Phase 2.
