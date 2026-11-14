@@ -1,0 +1,16 @@
+[project]
+name = "duo-agent"
+version = "0.1.0"
+description = "Device-side CLI for a cloned, dedicated Duo device slot"
+requires-python = ">=3.9"
+dependencies = ["requests", "pyotp", "cryptography"]
+
+[project.scripts]
+duo-agent = "duo_agent.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["duo_agent"]
